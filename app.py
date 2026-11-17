@@ -72,9 +72,23 @@ _plock = threading.Lock()
 _qcache = OrderedDict()
 
 
+ERR = {"embed": None, "llm": None}
+
+
+def note(kind, e):
+    msg = repr(e)
+    if hasattr(e, "read"):
+        try:
+            msg += " " + e.read().decode("utf-8", "replace")[:200]
+        except Exception:
+            pass
+    ERR[kind] = msg[:400].replace(token_key() or "\0", "***")
+
+
 def _post(path, payload, timeout):
     req = urllib.request.Request(BASE + path, data=json.dumps(payload).encode(),
-                                 headers={"Authorization": f"Bearer {token_key()}", "Content-Type": "application/json"})
+                                 headers={"Authorization": f"Bearer {token_key()}", "Content-Type": "application/json",
+                                          "User-Agent": "rag-service/1.0"})
     with urllib.request.urlopen(req, timeout=timeout) as r:
         return json.loads(r.read())
 
@@ -112,7 +126,8 @@ def passage_vectors():
                 json.dump({"key": key, "vecs": vecs}, open(CACHE_FILE, "w"))
             except Exception:
                 pass
-        except Exception:
+        except Exception as e:
+            note("embed", e)
             _pvec = None
         return _pvec
 
@@ -221,7 +236,8 @@ async def answer_query(question, top_k):
     try:
         await asyncio.to_thread(passage_vectors)
         qvec = await asyncio.wait_for(asyncio.to_thread(query_vector, q), 4.0)
-    except Exception:
+    except Exception as e:
+        note("embed", e)
         qvec = None
     ranked = rank(q, qvec)
     if ranked[0][0] < ABSTAIN_MIN:
@@ -233,7 +249,8 @@ async def answer_query(question, top_k):
         try:
             async with _sem:
                 res = await asyncio.wait_for(asyncio.to_thread(call_llm, q, cands, min(left, 6.0)), left)
-        except Exception:
+        except Exception as e:
+            note("llm", e)
             res = None
     if isinstance(res, dict):
         ans = res.get("answer")
@@ -284,7 +301,8 @@ async def app(scope, receive, send):
         await send({"type": "http.response.start", "status": 204, "headers": CORS})
         return await send({"type": "http.response.body", "body": b""})
     if path in ("/", "/healthz") and method == "GET":
-        return await reply(200, {"ok": True, "passages": N, "embeddings_ready": _pvec is not None})
+        return await reply(200, {"ok": True, "passages": N, "embeddings_ready": _pvec is not None,
+                                  "token_set": bool(token_key()), "embed_error": ERR["embed"], "llm_error": ERR["llm"]})
     if path != "/query":
         return await reply(404, {"error": "not found"})
     if method != "POST":
